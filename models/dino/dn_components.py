@@ -32,15 +32,15 @@ def prepare_for_cdn(dn_args, training, num_queries, num_classes, hidden_dim, lab
     if training:
         targets, dn_number, label_noise_ratio, box_noise_scale = dn_args
         # positive and negative dn queries
-        dn_number = dn_number * 2
+        dn_number = dn_number * 2 # 200
         known = [(torch.ones_like(t['labels'])).cuda() for t in targets]
         batch_size = len(known)
-        known_num = [sum(k) for k in known]
+        known_num = [sum(k) for k in known] # list [3, 8]  和dn一样，第一张图3个目标  第二张图8个
         if int(max(known_num)) == 0:
             dn_number = 1
         else:
             if dn_number >= 100:
-                dn_number = dn_number // (int(max(known_num) * 2))
+                dn_number = dn_number // (int(max(known_num) * 2))  # 200//16 == 12  这样实现的好处是，如果一张图片目标多，那dn组就少一点，反之依然。
             elif dn_number < 1:
                 dn_number = 1
         if dn_number == 0:
@@ -53,10 +53,10 @@ def prepare_for_cdn(dn_args, training, num_queries, num_classes, hidden_dim, lab
         known_indice = torch.nonzero(unmask_label + unmask_bbox)
         known_indice = known_indice.view(-1)
 
-        known_indice = known_indice.repeat(2 * dn_number, 1).view(-1)
-        known_labels = labels.repeat(2 * dn_number, 1).view(-1)
-        known_bid = batch_idx.repeat(2 * dn_number, 1).view(-1)
-        known_bboxs = boxes.repeat(2 * dn_number, 1)
+        known_indice = known_indice.repeat(2 * dn_number, 1).view(-1)  #264
+        known_labels = labels.repeat(2 * dn_number, 1).view(-1) #264
+        known_bid = batch_idx.repeat(2 * dn_number, 1).view(-1) #264
+        known_bboxs = boxes.repeat(2 * dn_number, 1)  # 11 重复24次   ==264  [264,4]
         known_labels_expaned = known_labels.clone()
         known_bbox_expand = known_bboxs.clone()
 
@@ -65,19 +65,19 @@ def prepare_for_cdn(dn_args, training, num_queries, num_classes, hidden_dim, lab
             chosen_indice = torch.nonzero(p < (label_noise_ratio * 0.5)).view(-1)  # half of bbox prob
             new_label = torch.randint_like(chosen_indice, 0, num_classes)  # randomly put a new one here
             known_labels_expaned.scatter_(0, chosen_indice, new_label)
-        single_pad = int(max(known_num))
+        single_pad = int(max(known_num)) # 8
 
-        pad_size = int(single_pad * 2 * dn_number)
-        positive_idx = torch.tensor(range(len(boxes))).long().cuda().unsqueeze(0).repeat(dn_number, 1)
+        pad_size = int(single_pad * 2 * dn_number) # 192
+        positive_idx = torch.tensor(range(len(boxes))).long().cuda().unsqueeze(0).repeat(dn_number, 1)  
         positive_idx += (torch.tensor(range(dn_number)) * len(boxes) * 2).long().cuda().unsqueeze(1)
-        positive_idx = positive_idx.flatten()
+        positive_idx = positive_idx.flatten() # positive_idx仅仅为了计算negative_idx
         negative_idx = positive_idx + len(boxes)
         if box_noise_scale > 0:
-            known_bbox_ = torch.zeros_like(known_bboxs)
-            known_bbox_[:, :2] = known_bboxs[:, :2] - known_bboxs[:, 2:] / 2
+            known_bbox_ = torch.zeros_like(known_bboxs) # [264,4]  cx,xy,w,h
+            known_bbox_[:, :2] = known_bboxs[:, :2] - known_bboxs[:, 2:] / 2    # 从cx cy w h 转换成 [top-left x, top-left y, bottom-right x, bottom-right y]
             known_bbox_[:, 2:] = known_bboxs[:, :2] + known_bboxs[:, 2:] / 2
 
-            diff = torch.zeros_like(known_bboxs)
+            diff = torch.zeros_like(known_bboxs) # 相当于在box里面设置个一半大小的box
             diff[:, :2] = known_bboxs[:, 2:] / 2
             diff[:, 2:] = known_bboxs[:, 2:] / 2
 
@@ -91,25 +91,32 @@ def prepare_for_cdn(dn_args, training, num_queries, num_classes, hidden_dim, lab
             known_bbox_expand[:, :2] = (known_bbox_[:, :2] + known_bbox_[:, 2:]) / 2
             known_bbox_expand[:, 2:] = known_bbox_[:, 2:] - known_bbox_[:, :2]
 
+
+        # for i in range(known_bbox_expand.size(0)):
+        #     for j in range(4):
+        #         if known_bbox_expand[i, j] < 0:
+        #             print(f"box {i}: {known_bbox_expand[i]}")
+
         m = known_labels_expaned.long().to('cuda')
-        input_label_embed = label_enc(m)
+        # print(m)
+        input_label_embed = label_enc(m)  # [264,256]
         input_bbox_embed = inverse_sigmoid(known_bbox_expand)
 
-        padding_label = torch.zeros(pad_size, hidden_dim).cuda()
-        padding_bbox = torch.zeros(pad_size, 4).cuda()
+        padding_label = torch.zeros(pad_size, hidden_dim).cuda()  # [192, 256]
+        padding_bbox = torch.zeros(pad_size, 4).cuda() # [192, 4]
 
-        input_query_label = padding_label.repeat(batch_size, 1, 1)
-        input_query_bbox = padding_bbox.repeat(batch_size, 1, 1)
+        input_query_label = padding_label.repeat(batch_size, 1, 1) # [bs, 192, 256]
+        input_query_bbox = padding_bbox.repeat(batch_size, 1, 1) # [bs, 192, 4]
 
         map_known_indice = torch.tensor([]).to('cuda')
         if len(known_num):
-            map_known_indice = torch.cat([torch.tensor(range(num)) for num in known_num])  # [1,2, 1,2,3]
-            map_known_indice = torch.cat([map_known_indice + single_pad * i for i in range(2 * dn_number)]).long()
+            map_known_indice = torch.cat([torch.tensor(range(num)) for num in known_num])  # [0, 1, 2, 0, 1, 2, 3, 4, 5, 6, 7]
+            map_known_indice = torch.cat([map_known_indice + single_pad * i for i in range(2 * dn_number)]).long() #[264]
         if len(known_bid):
             input_query_label[(known_bid.long(), map_known_indice)] = input_label_embed
             input_query_bbox[(known_bid.long(), map_known_indice)] = input_bbox_embed
 
-        tgt_size = pad_size + num_queries
+        tgt_size = pad_size + num_queries # 1092
         attn_mask = torch.ones(tgt_size, tgt_size).to('cuda') < 0
         # match query cannot see the reconstruct
         attn_mask[pad_size:, :pad_size] = True

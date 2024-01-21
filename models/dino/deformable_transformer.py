@@ -283,11 +283,11 @@ class DeformableTransformer(nn.Module):
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             src_flatten.append(src)
             mask_flatten.append(mask)
-        src_flatten = torch.cat(src_flatten, 1)    # bs, \sum{hxw}, c 
-        mask_flatten = torch.cat(mask_flatten, 1)   # bs, \sum{hxw}
-        lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1) # bs, \sum{hxw}, c 
+        src_flatten = torch.cat(src_flatten, 1)    # bs, \sum{hxw}, c  [bs,8126,256] 把不同level feature cat成一个token seq
+        mask_flatten = torch.cat(mask_flatten, 1)   # bs, \sum{hxw}     [bs,8126]
+        lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1) # bs, \sum{hxw}, c  [bs,8126,256]
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=src_flatten.device)
-        level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
+        level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1])) # 0 6144 7680, 8064
         valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
 
         # two stage
@@ -308,7 +308,7 @@ class DeformableTransformer(nn.Module):
                 )
         #########################################################
         # End Encoder
-        # - memory: bs, \sum{hw}, c
+        # - memory: bs, \sum{hw}, c [bs,8126,256]
         # - mask_flatten: bs, \sum{hw}
         # - lvl_pos_embed_flatten: bs, \sum{hw}, c
         # - enc_intermediate_output: None or (nenc+1, bs, nq, c) or (nenc, bs, nq, c)
@@ -320,8 +320,8 @@ class DeformableTransformer(nn.Module):
                 input_hw = self.two_stage_wh_embedding.weight[0]
             else:
                 input_hw = None
-            output_memory, output_proposals = gen_encoder_output_proposals(memory, mask_flatten, spatial_shapes, input_hw)
-            output_memory = self.enc_output_norm(self.enc_output(output_memory))
+            output_memory, output_proposals = gen_encoder_output_proposals(memory, mask_flatten, spatial_shapes, input_hw) # [bs,8160,256] [bs,8160,256]
+            output_memory = self.enc_output_norm(self.enc_output(output_memory)) # [bs,8160,256]
             
             if self.two_stage_pat_embed > 0:
                 bs, nhw, _ = output_memory.shape
@@ -336,25 +336,25 @@ class DeformableTransformer(nn.Module):
                 output_memory = torch.cat((output_memory, tgt), dim=1)
                 output_proposals = torch.cat((output_proposals, refpoint_embed), dim=1)
 
-            enc_outputs_class_unselected = self.enc_out_class_embed(output_memory)
-            enc_outputs_coord_unselected = self.enc_out_bbox_embed(output_memory) + output_proposals # (bs, \sum{hw}, 4) unsigmoid
+            enc_outputs_class_unselected = self.enc_out_class_embed(output_memory) # [bs,8160,151]
+            enc_outputs_coord_unselected = self.enc_out_bbox_embed(output_memory) + output_proposals # (bs, \sum{hw}, 4) unsigmoid  [bs,8160,4]
             topk = self.num_queries
-            topk_proposals = torch.topk(enc_outputs_class_unselected.max(-1)[0], topk, dim=1)[1] # bs, nq
+            topk_proposals = torch.topk(enc_outputs_class_unselected.max(-1)[0], topk, dim=1)[1] # bs, nq  [bs, 900]
 
             # gather boxes
-            refpoint_embed_undetach = torch.gather(enc_outputs_coord_unselected, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)) # unsigmoid
+            refpoint_embed_undetach = torch.gather(enc_outputs_coord_unselected, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)) # unsigmoid  [bs,900,4]
             refpoint_embed_ = refpoint_embed_undetach.detach()
-            init_box_proposal = torch.gather(output_proposals, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)).sigmoid() # sigmoid
+            init_box_proposal = torch.gather(output_proposals, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)).sigmoid() # sigmoid [bs,900,4]
 
             # gather tgt
-            tgt_undetach = torch.gather(output_memory, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model))
+            tgt_undetach = torch.gather(output_memory, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model))  # [bs,900,256]
             if self.embed_init_tgt:
-                tgt_ = self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1) # nq, bs, d_model
+                tgt_ = self.tgt_embed.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1) # nq, bs, d_model [bs,900,256]
             else:
                 tgt_ = tgt_undetach.detach()
 
             if refpoint_embed is not None:
-                refpoint_embed=torch.cat([refpoint_embed,refpoint_embed_],dim=1)
+                refpoint_embed=torch.cat([refpoint_embed,refpoint_embed_],dim=1)  # [bs,1092,4]
                 tgt=torch.cat([tgt,tgt_],dim=1)
             else:
                 refpoint_embed,tgt=refpoint_embed_,tgt_
@@ -519,7 +519,8 @@ class TransformerEncoder(nn.Module):
 
         output = src
         # preparation and reshape
-        if self.num_layers > 0:
+        # reference_points torch.Size([bs, 8160, 4, 2])
+        if self.num_layers > 0:  #6
             if self.deformable_encoder:
                 reference_points = self.get_reference_points(spatial_shapes, valid_ratios, device=src.device)
 

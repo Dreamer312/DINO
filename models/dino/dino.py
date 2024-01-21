@@ -72,26 +72,26 @@ class DINO(nn.Module):
                                 -2 : learn a shared w and h
         """
         super().__init__()
-        self.num_queries = num_queries
+        self.num_queries = num_queries #900
         self.transformer = transformer
         self.num_classes = num_classes
         self.hidden_dim = hidden_dim = transformer.d_model
         self.num_feature_levels = num_feature_levels
         self.nheads = nheads
-        self.label_enc = nn.Embedding(dn_labelbook_size + 1, hidden_dim)
+        self.label_enc = nn.Embedding(dn_labelbook_size + 1, hidden_dim) #[152,256]
 
         # setting query dim
-        self.query_dim = query_dim
+        self.query_dim = query_dim #4
         assert query_dim == 4
-        self.random_refpoints_xy = random_refpoints_xy
-        self.fix_refpoints_hw = fix_refpoints_hw
+        self.random_refpoints_xy = random_refpoints_xy #F
+        self.fix_refpoints_hw = fix_refpoints_hw # -1
 
         # for dn training
         self.num_patterns = num_patterns
-        self.dn_number = dn_number
-        self.dn_box_noise_scale = dn_box_noise_scale
-        self.dn_label_noise_ratio = dn_label_noise_ratio
-        self.dn_labelbook_size = dn_labelbook_size
+        self.dn_number = dn_number # 100
+        self.dn_box_noise_scale = dn_box_noise_scale # 1
+        self.dn_label_noise_ratio = dn_label_noise_ratio # 0.5
+        self.dn_labelbook_size = dn_labelbook_size # 151
 
         # prepare input projection layers
         if num_feature_levels > 1:
@@ -126,8 +126,8 @@ class DINO(nn.Module):
         assert iter_update, "Why not iter_update?"
 
         # prepare pred layers
-        self.dec_pred_class_embed_share = dec_pred_class_embed_share
-        self.dec_pred_bbox_embed_share = dec_pred_bbox_embed_share
+        self.dec_pred_class_embed_share = dec_pred_class_embed_share # True
+        self.dec_pred_bbox_embed_share = dec_pred_bbox_embed_share # True
         # prepare class & box embed
         _class_embed = nn.Linear(hidden_dim, num_classes)
         _bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
@@ -152,17 +152,17 @@ class DINO(nn.Module):
         self.transformer.decoder.class_embed = self.class_embed
 
         # two stage
-        self.two_stage_type = two_stage_type
-        self.two_stage_add_query_num = two_stage_add_query_num
+        self.two_stage_type = two_stage_type # standard
+        self.two_stage_add_query_num = two_stage_add_query_num #0
         assert two_stage_type in ['no', 'standard'], "unknown param {} of two_stage_type".format(two_stage_type)
         if two_stage_type != 'no':
-            if two_stage_bbox_embed_share:
+            if two_stage_bbox_embed_share:    # two_stage_bbox_embed_share False 所以走else
                 assert dec_pred_class_embed_share and dec_pred_bbox_embed_share
                 self.transformer.enc_out_bbox_embed = _bbox_embed
             else:
                 self.transformer.enc_out_bbox_embed = copy.deepcopy(_bbox_embed)
     
-            if two_stage_class_embed_share:
+            if two_stage_class_embed_share:  # two_stage_class_embed_share False 所以走else
                 assert dec_pred_class_embed_share and dec_pred_bbox_embed_share
                 self.transformer.enc_out_class_embed = _class_embed
             else:
@@ -172,7 +172,7 @@ class DINO(nn.Module):
             if self.two_stage_add_query_num > 0:
                 self.init_ref_points(two_stage_add_query_num)
 
-        self.decoder_sa_type = decoder_sa_type
+        self.decoder_sa_type = decoder_sa_type # sa
         assert decoder_sa_type in ['sa', 'ca_label', 'ca_content']
         if decoder_sa_type == 'ca_label':
             self.label_embedding = nn.Embedding(num_classes, hidden_dim)
@@ -236,7 +236,7 @@ class DINO(nn.Module):
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
         features, poss = self.backbone(samples)
-
+        #features list[[bs,512,100,134],mask:[bs,100,134]] [[bs,1024,50,67], mask:[bs,50,67]] [[bs, 2048, 25, 34],mask:[bs,25, 34]]
         srcs = []
         masks = []
         for l, feat in enumerate(features):
@@ -244,9 +244,9 @@ class DINO(nn.Module):
             srcs.append(self.input_proj[l](src))
             masks.append(mask)
             assert mask is not None
-        if self.num_feature_levels > len(srcs):
-            _len_srcs = len(srcs)
-            for l in range(_len_srcs, self.num_feature_levels):
+        if self.num_feature_levels > len(srcs): # 4 > 3
+            _len_srcs = len(srcs) #3
+            for l in range(_len_srcs, self.num_feature_levels):    # 3-4
                 if l == _len_srcs:
                     src = self.input_proj[l](features[-1].tensors)
                 else:
@@ -254,10 +254,11 @@ class DINO(nn.Module):
                 m = samples.mask
                 mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
                 pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype)
-                srcs.append(src)
+                srcs.append(src)  #  src [bs, 256, 13, 17] 这个是stage4的输出再过一个卷积得到的
                 masks.append(mask)
                 poss.append(pos_l)
-
+                
+        # [bs,192,256]   [bs,192,4]   [1092,1092] 
         if self.dn_number > 0 or targets is not None:
             input_query_label, input_query_bbox, attn_mask, dn_meta =\
                 prepare_for_cdn(dn_args=(targets, self.dn_number, self.dn_label_noise_ratio, self.dn_box_noise_scale),
